@@ -533,3 +533,108 @@ robotd --sim 127.0.0.1:7801       # 主仓库侧：daemon 连仿真躯体
 > 对 Pi 验证的意义：`--fake` 是"无机器人"的最低档，`--sim` 是其更完整的形态——控制环、
 > 策略推理、安全层全部对着仿真躯体真跑。切到该 dev tag（或等它进 main）后，Pi 上
 > 可验证比 runbook 现在所写更接近真实的东西。
+
+---
+
+## 之四：策略网络本体——规格与真实 ONNX 解剖
+
+> 依据：`microduck_velocity_env_cfg.py` 的 RL 配置、`duck-control/src/{obs,policy}.rs`、
+> `robotd/src/control.rs`，以及对官方 `alpha_walking.onnx`（HF Hub，经 hf-mirror 下载，
+> 776 KB）的实际图结构解析（2026-09-04，onnx Python 库）。
+
+### 网络规格：一个小型前馈 MLP
+
+| 项 | 值 |
+|---|---|
+| 结构 | `61 → 512 → 256 → 128 → 14`，纯全连接 |
+| 参数量 | **约 19.8 万**（≈0.8 MB @ fp32；实测 alpha_walking.onnx 为 776 KB，吻合） |
+| 激活函数 | ELU（隐层），输出层线性（无激活） |
+| 策略分布 | `GaussianDistribution`，`init_std=1.0`，scalar std（训练期探索用；部署时取均值动作） |
+| Critic | 同构 `(512,256,128)`，**不随部署携带**——只有 actor 上机 |
+| 图形状 | ONNX `[1,61] → [1,14]`，导出时强制验证 |
+
+没有 LSTM、没有 Transformer、没有注意力——"会走路"的全部知识压缩在约 20 万个
+浮点数里。
+
+### 输入 61 维逐位定义（`duck-control/src/obs.rs`，自称"本 crate 最高危代码"）
+
+```
+ 0..3    陀螺仪（躯干坐标系，rad/s）
+ 3..6    重力投影（单位向量；直立 = [0,0,-1]）
+ 6..20   14 个关节位置 − home 姿态（嘴被排除）
+20..34   14 个关节速度
+34..48   上一步的动作（14）
+48..61   指令块：twist(3) + head(4) + body(6)
+```
+
+- **纯本体感知**：没有视觉、没有深度、没有外部感知——策略仅凭陀螺仪和关节编码器
+  行走
+- 上一步动作作为输入构成短期记忆，用于补偿系统延迟
+- 61 维宽度是训练与部署的**编译期共享契约**（`duck-ipc-proto` 持有相同常量，
+  `assert!` 保证相等）
+
+### 输出：相对 home 姿态的偏移
+
+```
+舵机目标角 = home 姿态 + action_scale × action
+```
+
+- `action_scale` 为运行时可调参数；站立使用更小的 scale 与软化增益，踢球窗口沿用
+  站立调参（历史行为，踢球即按该组参数训练，有意保留）
+- 输出经安全层（关节限位、温度、跌倒检测）钳位后才写入总线
+- 14 维不含嘴，嘴由独立逻辑控制
+
+### 训练超参（补充之二/之三未列全的部分）
+
+| 项 | 值 |
+|---|---|
+| PPO clip | 0.2，`use_clipped_value_loss`，`value_loss_coef=1.0` |
+| 学习率调度 | **自适应**，按 KL 散度目标 `desired_kl=0.01` 调节 |
+| 每次更新的 epoch | 5 |
+| 梯度裁剪 | `max_grad_norm=1.0` |
+| 采样 | 4096 envs × 24 steps ≈ 10 万步/迭代，4 minibatches |
+
+### 真实解剖：`alpha_walking.onnx` 的完整计算图
+
+**完整图只有 9 个算子**——行走能力的全部计算路径：
+
+```
+输入 obs [1,61]
+  │
+  ├─ Sub   (obs − obs_normalizer._mean)     ┐ 观测归一化器
+  ├─ Div   (÷ std)                          ┘ 烘焙进图的前两步
+  │
+  ├─ Gemm  [61→512]  + Elu                  ┐
+  ├─ Gemm  [512→256] + Elu                  │ MLP 主体
+  ├─ Gemm  [256→128] + Elu                  ┘
+  ├─ Gemm  [128→14]                          （线性输出）
+  │
+  └─ 输出 actions [1,14]
+```
+
+10 个权重张量：
+
+```
+obs_normalizer._mean  [1,61]     ← 训练期统计的 61 个均值
+onnx::Div_24          [1,61]     ← 61 个标准差
+mlp.0.weight [512,61]  mlp.0.bias [512]
+mlp.2.weight [256,512] mlp.2.bias [256]
+mlp.4.weight [128,256] mlp.4.bias [128]
+mlp.6.weight [14,128]  mlp.6.bias [14]
+```
+
+查看工具：`https://netron.app`（网页版）可直接可视化整个图与每层权重。
+
+### "模型实现是数据文件，不是代码"
+
+两个仓库中**均无手写的网络实现**，三个组成部分各司其职：
+
+| 组成 | 位置 | 职责 |
+|---|---|---|
+| 网络定义 | 第三方包 **rsl_rl**（`leggedrobotics/rsl_rl` 的 `ActorCritic` + `GaussianDistribution`，pip 安装） | 定义 `nn.Module` 的搭建，训练时前向/反向 |
+| 序列化 | `microduck_rl/export.py`（`torch.onnx.export`） | 把训好的模块导出为上图的 9 算子图，归一化器一并烘焙 |
+| 执行 | 第三方库 **ONNX Runtime**（`duck-control/policy.rs` 经 `ort` dlopen `libonnxruntime.so`） | 运行时执行 9 个算子；`policy.rs` 仅为调用编排（加载/验证/喂输入/取输出） |
+
+设计含义：**只要图形状为 `[1,61]→[1,14]`，训练侧任意改动网络结构（增大 MLP、增加
+层数）都不影响部署侧代码**——这正是全族策略热切换、社区策略即插即用得以成立的
+基础。
