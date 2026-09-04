@@ -191,7 +191,7 @@ ls /opt/robot/daemon/releases/   # keep_previous=1：旧版还在
 
 ### G2 扬声器 + 麦克风（USB 声卡）
 
-真机上的 TLV320AIC3104 对软件只是"一个 ALSA 声卡"；DKMS/overlay 那些苦活是 Rockchip 板级的，Pi 完全绕开。
+真机上的 TLV320AIC3104 对软件只是"一个 ALSA 声卡"；DKMS/overlay 那些适配工作是 Rockchip 板级的，Pi 完全绕开。
 
 1. 硬件：任意 USB 声卡（playback + capture 双通道）
 2. `sudo apt install -y alsa-utils`（放声和采集都是 `aplay`/`arecord` 子进程调用）
@@ -212,7 +212,7 @@ Vin → 3.3V   GND → GND   SDA → GPIO2   SCL → GPIO3
 
 ### G1 摄像头（唯一需要动代码的）
 
-`mediad` 管线：`videotestsrc/v4l2src → NV12 → videoflip → tee → webrtcsink → mpph264enc`，**编码器元素钉在 `pipeline.rs` 里**（Rockchip MPP 零拷贝路径），Pi 上插件不存在，管线起不来。
+`mediad` 管线：`videotestsrc/v4l2src → NV12 → videoflip → tee → webrtcsink → mpph264enc`，**编码器元素名固定在 `pipeline.rs` 里**（Rockchip MPP 零拷贝路径），Pi 上插件不存在，管线起不来。
 
 1. 硬件：**第一次建议 USB UVC 摄像头**（`v4l2src device=/dev/video0` 直接工作）；Pi 官方 CSI 摄像头在 Bookworm 走 libcamera，`v4l2src` 看不到，要用 `libcamerasrc`
 2. 代码改动（`mediad/src/pipeline.rs`）：编码器可选化——Pi 4 有 V4L2 M2M 硬编（`v4l2h264enc`，bcm2835-codec），或退 `x264enc` 软编。**旋转必须留在管线里**（`videoflip` 在 tee 之前），否则重复"97 °C 降频到 8 fps"的旧坑
@@ -227,7 +227,7 @@ Vin → 3.3V   GND → GND   SDA → GPIO2   SCL → GPIO3
 2. **供电**：XL330 是 5 V，15 个舵机峰值不小，**独立 5V 电源**（共地），绝不能从 Pi 取电
 3. 接线：XL330 菊花链 + `imu_to_dxl` 板（id 200）同一总线；没有 IMU 板也能跑，但观测向量缺姿态输入
 4. 配置：`robotd --port /dev/ttyUSB0`（`--help` 原话："为接线不同的板子准备"）；systemd drop-in 里把 `--fake` 换成 `--port`
-5. 策略：手动装 ONNX Runtime arm64（`workspace.metadata.onnxruntime` 钉的 1.28.0）+ 从 HF `pollen-robotics/microduck-policies` 拉策略
+5. 策略：手动装 ONNX Runtime arm64（`workspace.metadata.onnxruntime` 锁定的 1.28.0）+ 从 HF `pollen-robotics/microduck-policies` 拉策略
 6. 验证阶梯：`--no-policy` 先跑通总线读写 → `robotctl robot init`（上力矩回 home）→ `robotctl robot stand` → 最后才挂策略走路
 7. **安全**：这一步起机器人会真的动——架空、急断电在手边
 

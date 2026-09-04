@@ -59,7 +59,7 @@
 ### `duck-ipc-proto` — 线路协议契约（整个系统的枢纽）
 - 所有 `update.*` / `robot.*` / `net.*` / `system.*` / `pad.*` / `tof.*` 方法的 serde 类型定义，方法与参数通过 `Call` 枚举**类型级绑定**——不可能把 A 方法的参数发给 B 方法
 - 协议版本在 `hello` 里交换；版本号 bump 规则有成文约定（"一个 bump 在两个方向上都不承诺任何事"）
-- **依赖被锁死在 serde/serde_json/semver**——恢复路径上的所有服务都要说这些类型，谁也不许把 http/tar/crypto/async 运行时拖进来
+- **依赖被限定在 serde/serde_json/semver**——恢复路径上的所有服务都要说这些类型，任何修改都不得引入 http/tar/crypto/async 运行时依赖
 
 ### `duck-control` — 控制内核
 - `model.rs`（机器人模型）· `bus.rs`（Dynamixel 总线）· `imu.rs` · `obs.rs`（策略观测向量）· `policy.rs`（ONNX 推理，`ort` dlopen 运行时）· `safety.rs` · `fall.rs`（跌倒检测）· `io.rs`
@@ -152,12 +152,12 @@
 - **`setup-board.sh` 必须关掉 `serial-getty@ttyS2`**：Armbian 默认在 UART2 上跑登录控制台，一个 `agetty` 占着口，所有舵机对谁都不可见。`fuser -v /dev/ttyS2` 是排查这个的第一命令。
 - **`i2c3` 是共享总线**：ToF 传感器和音频编解码器同在 `i2c3`（排针 3/5 脚）。`setup-board.sh` 的音频段落负责把总线本身带起来，ToF 段只补 `/dev/i2c-pihat` 这个稳定名。
 - **ToF 上电要传 ~90 KB 固件**（每次启动都传，走 I²C 需要数秒）——这是它独立成 `tofd` 进程的直接原因之一；两代传感器（L5CX/L8CX）在板上是可互换的，daemon 按 ID 读数选驱动。
-- **内核选择是被硬件绑死的**：音频编解码器的 I²S 时钟树只存在于 Armbian **vendor（BSP 6.1）** 内核，rkaiq 3A 也只在 vendor rkisp 上有——所以固件钉死 vendor 内核，不能换 mainline。
+- **内核选择受硬件约束**：音频编解码器的 I²S 时钟树只存在于 Armbian **vendor（BSP 6.1）** 内核，rkaiq 3A 也只在 vendor rkisp 上有——所以固件被锁定在 vendor 内核，不能换 mainline。
 - **XL330 出厂 `return_delay_time` = 250**（500 µs 往返/设备），16 个设备就是 8 ms——模型初始化时必须把它调小，这是控制循环能跑 50 Hz 的前提之一。
 - **AIC8800 无线芯片的蓝牙问题**（两个独立故障，两个旗标分别绕过；这块芯片**不是最终量产的射频方案**，换掉后 workaround 和旗标一并删除）：
   1. **`btd` 广播期间手柄无法新建 bond**。`--pause-btd-on-pair` 让 `robotctl pad pair` 在配对窗口期间暂停 `btd`；实测还证明它才是早年那些"驱动背锅"的真相——以前归咎于 aic8800 驱动的失败案例全都发生在 `btd` 广播时，那才是未被控制的变量。
   2. **约半数 Zero 3W 在 BlueZ 默认 `Privacy = off` 下根本无法配对**，只有 `Privacy = device` 能用（`--weird-ble` 设定）。但 `device` 在不需要它的板子上会**破坏重连**——干净的 bond 也会以 `PIN or Key Missing` 摆动，比配不上更糟，因为它看起来成功了。
-  两半修的不是同一个故障，不能打包：一块能用 `off` + 暂停配对的板子要新旗标；一块 `off` 下完全 bond 不上的板子仍要 `--weird-ble`。
+  两者修复的不是同一个故障，不能合并处理：一块能用 `off` + 暂停配对的板子要新旗标；一块 `off` 下完全无法配对的板子仍要 `--weird-ble`。
 - **`scripts/pad-link-test.sh` 测的是这条蓝牙链路的两种死法**：**掉线**（设备消失，日志里有，死人开关会触发）和**停顿**（连接在、报告停了几百毫秒——更危险，`padd` 会拿旧摇杆值继续发 50 Hz 意图，`robotd` 看到的都是"新鲜"指令，死人开关不触发，机器人带着过期指令走）。
 - **电池电压经 Dynamixel 总线读出**（总线无应答 = 读数为 0，报未知而非显示 0%）；满/空映射（8.2/6.6 V）写在 `duck-control::model`，客户端画电量条不用知道电池型号。
 - **IMX219 的 3A（白平衡/曝光）要装 rkaiq**：不装也能用，但画面发绿、噪声大、曝光固定——`scripts/setup-rkaiq.sh` 装 Rockchip 的 camera-engine-rkaiq 和 IMX219 调优文件。
