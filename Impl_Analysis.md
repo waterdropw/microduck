@@ -693,6 +693,37 @@ DUCK_SIM_SCENE=apartment DUCK_SIM_VIEWER=0 sh scripts/duck-sim up`；操作经
 **未能运行的部分**：摄像头与控制台（需未发布的 body_server + EGL + gst 插件）、
 合唱（需 BLE）、`monitor` 3D 视图（需显示器）、叫声播放（容器无 ALSA，优雅降级）。
 
+### GUI 人工监督模式（Xvfb + VNC，无需物理显示器）
+
+实测于 2026-09-07：无头服务器上通过虚拟 X server + VNC 实现"看着鸭子遛"。
+
+```
+你的电脑 ──VNC──▶ 主机:5900 ──▶ 容器（duck-sim-gui 镜像）
+                                   ├─ Xvfb :99（虚拟显示器 1280×800）
+                                   ├─ MuJoCo 视窗（DUCK_SIM_VIEWER=1）
+                                   ├─ duck-body ──TCP──┬─ robotd duck-a
+                                   └───────────────────┴─ robotd duck-b
+```
+
+搭建三步：
+
+1. **GUI 镜像**（基于 `duck-dev-build`，TUNA apt 源继承自基础镜像）：
+   `xvfb x11vnc libglfw3 libgl1 libglu1-mesa imagemagick`
+   （imagemagick 用于 `import -window root` 截图自检）
+2. **容器**：`-p 5900:5900` + 挂载 `$HOME`，与无头模式相同的 env；
+   先起 `Xvfb :99 -screen 0 1280x800x24 -ac`，`DISPLAY=:99` + `DUCK_SIM_VIEWER=1`
+   再跑 `duck-sim up`，最后 `x11vnc -display :99 -forever -shared -passwd <密码>`
+3. **连接**：任意 VNC 客户端 → `<主机IP>:5900`；MuJoCo 视窗支持鼠标拖拽转视角
+
+验证要点：截图像素统计（`convert -format "%[fx:standard_deviation]" info:`，
+非零即真实渲染内容，实测 stddev=90 / 230 万色）；**开视窗状态下控制环仍
+50.0/50.0 Hz、0 丢帧**——"观看耗帧"的担心实测未发生，且若发生，`status` 的
+Hz 数字会直接暴露。
+
+进阶路径：主机有 NVIDIA GPU 时，`MUJOCO_GL=egl` 可做无头 GPU 渲染——待
+body_server 的相机功能发布后，`DUCK_SIM_CAMERAS=all` + mediad 控制台可完全
+无头运行，浏览器直接看鸭子第一视角（VNC 只需服务交互视窗）。
+
 ### 价值：`--fake` 之上的完全体验
 
 `--fake` 证明的是"软件栈能跑"；`--sim` 证明的是**控制闭环对物理（仿真物理）成立**：
