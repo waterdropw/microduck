@@ -638,3 +638,64 @@ mlp.6.weight [14,128]  mlp.6.bias [14]
 设计含义：**只要图形状为 `[1,61]→[1,14]`，训练侧任意改动网络结构（增大 MLP、增加
 层数）都不影响部署侧代码**——这正是全族策略热切换、社区策略即插即用得以成立的
 基础。
+
+---
+
+## 之五：仿真躯体——`duck-body` + `duck-sim` 多鸭仿真（Docker 实测，2026-09-07）
+
+> 依据：`microduck_rl` 的 `sim/body_server.py` / `sim/tof.py`，microduck 上游 tag
+> `daemon-dev-sim-remote-io`（2026-09-02，截至本仓库 main 尚未合入）的
+> `scripts/duck-sim` 与 `docs/design/simulation.md`。
+
+### 架构：`RobotIo` 之上的一切是真代码
+
+```
+Docker 容器（amd64）
+ ├─ MuJoCo 世界（apartment：7×6 m 六房间、50 cm 墙、错位门洞——不对称性
+ │   让一个 45° 前向视野能消歧姿态）
+ │    └─ duck-body（microduck_rl）：一鸭一 TCP 端口、共享一个世界、能互相碰撞
+ ├─ duck-a：真 robotd --sim（50 Hz 循环 + ONNX 策略 + 安全层）+ 真 tofd --sim
+ └─ duck-b：同上，独立进程、独立意图流、独立声音人格（种子取自容器 machine-id）
+```
+
+- **协议**：换行 JSON over TCP + 握手校验协议版本——两半分属两个仓库，"你的模拟器
+  旧了"和"你的 daemon 旧了"不能是同一种症状；TCP 而非 unix socket 的理由在
+  `duck_control::sim`（跨机也可用）
+- **关键设计**：`RobotIo` trait 之上的一切都是真代码——50 Hz 循环、ONNX 推理、安全、
+  跌倒检测、里程计、运动学、全部 IPC；只有这个 TCP 进程知道没有真鸭子
+- `sim/tof.py`：仿真 VL53L5CX 连**每区状态字节**都仿真（"没东西"≠"测不到"，
+  只报距离的模拟器会放走硬件才能抓到的 bug），噪声随距离增长，数字来自数据手册
+  与桌面实测；帧以与真传感器相同的 `tof.frame` 格式发布
+
+### 实测验证（两鸭 + 公寓场景，无头模式）
+
+| 操作 | 结果 |
+|---|---|
+| 站立 | `trunk 0.116 m, gravity z -1.000`（躯干直立，与观测向量 3..6 位一致） |
+| `ctl health` | **50.0/50.0 Hz、0 tick 丢失**——"健康=截止时间达成率"的定义在仿真躯体下成立 |
+| `drive` | 前进 8 s、意图到期自停、频率保持 49.9 Hz |
+| 独立控制 duck-b | 各自的循环与意图流，互不干扰 |
+| `robot do roulade` | **技能热切换**（行走→翻滚→回站立），全程 0 丢帧 |
+
+### 本机运行要点（适配与坑）
+
+| 坑 | 处理 |
+|---|---|
+| RL 仓库的完整 `uv sync` 要拉 ~2 GB GPU 依赖 | `duck-body` 只需 **mujoco + numpy**（导入链已核）；轻量 venv + `.pth` 指向 `src/` 即可，onnxruntime 一并装入（`ORT_DYLIB_PATH` 需要） |
+| 公开 RL 仓库尚无 `--cameras/--frame-port`（配对 tag 的内部代码未发布） | `duck-sim` 脚本适配：无摄像头时不传这两个参数（CAMERAS 默认为空，不受影响） |
+| 容器内 `$HOME=/root` | 显式 `export HOME` 与绝对路径 |
+| 视窗 / 显示 | `DUCK_SIM_VIEWER=0` 无头运行（观看本身耗帧——注释原话："跟不上进度的模拟器就是站不稳的机器人"） |
+
+运行形态：`duck-dev-build` 镜像挂载 `$HOME`（绝对路径两侧一致），`DUCK_SIM_DUCKS=2
+DUCK_SIM_SCENE=apartment DUCK_SIM_VIEWER=0 sh scripts/duck-sim up`；操作经
+`duck-sim ctl`（每鸭独立，`DUCK_SIM_DUCK` 切换）。
+
+**未能运行的部分**：摄像头与控制台（需未发布的 body_server + EGL + gst 插件）、
+合唱（需 BLE）、`monitor` 3D 视图（需显示器）、叫声播放（容器无 ALSA，优雅降级）。
+
+### 价值：`--fake` 之上的完全体验
+
+`--fake` 证明的是"软件栈能跑"；`--sim` 证明的是**控制闭环对物理（仿真物理）成立**：
+策略输出真的驱动躯体、躯体状态真的回到观测、平衡真的在维持。对没有机器人的
+开发/验证（本仓库的 Pi 4 计划同理），这是能拿到的最高保真度——只差电机换成了
+TCP 对端的 MuJoCo。
