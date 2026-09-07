@@ -59,9 +59,17 @@ trap cleanup EXIT INT TERM
 #
 # Built inside the same userland the container runs, reusing the image `dev-push.sh --docker`
 # already defines. On an arm64 host that is a native build and the target is the host.
+#
+# LOCAL ADAPTATION (this fork only): DUCK_SYSTEMD_TEST_PLATFORM overrides the build
+# container's platform. Upstream is arm64 (the robot's userland, native on the author's
+# machine); on an x86_64 host with qemu-user, systemd as pid 1 cannot spawn any service
+# (every unit dies with Result=resources before fork) — verified with qemu 6.2 and 9 —
+# so the assertions are run natively on amd64 instead. What this harness observes —
+# on_apply restarts, transient timers, hooks, reconciliation — is arch-independent.
+PLATFORM="${DUCK_SYSTEMD_TEST_PLATFORM:-linux/arm64}"
 echo "==> building updaterd and robotctl for the container"
 docker build -q -t duck-dev-build -f scripts/dev-build.Dockerfile scripts/ >/dev/null
-docker run --rm --platform linux/arm64 \
+docker run --rm --platform "$PLATFORM" \
     -v "$PWD:/src" -w /src \
     -v duck-dev-cargo-registry:/usr/local/cargo/registry \
     -e CARGO_TARGET_DIR=/src/target/docker \

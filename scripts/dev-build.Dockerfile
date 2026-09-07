@@ -26,6 +26,19 @@ FROM rust:1-bookworm
 # Rust", and the reason `scripts/ci-cross-deps.sh` exists on the CI side. pkg-config is how
 # libudev-sys finds it. Nothing else: `zstd`'s C is compiled from source by the crate, and the
 # rust image already carries a C compiler for that.
-RUN apt-get update \
+#
+# LOCAL NETWORK ADAPTATION (this fork only): deb.debian.org is unreachable from
+# this network; point apt at the TUNA mirror first. Handles both the deb822
+# .sources layout (bookworm) and the legacy .list one.
+RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true \
+    && sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list 2>/dev/null || true \
+    && apt-get update \
     && apt-get install -y --no-install-recommends libudev-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
+
+# LOCAL NETWORK ADAPTATION (this fork only; upstream needs nothing here):
+# crates.io is unreachable directly from this network, so route cargo through
+# the rsproxy.cn mirror — same replacement ~/.cargo/config.toml makes on the host.
+RUN mkdir -p /usr/local/cargo \
+    && printf '[source.crates-io]\nreplace-with = "rsproxy-sparse"\n[source.rsproxy-sparse]\nregistry = "sparse+https://rsproxy.cn/index/"\n[net]\ngit-fetch-with-cli = true\n' \
+        > /usr/local/cargo/config.toml

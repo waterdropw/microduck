@@ -242,6 +242,44 @@ Vin → 3.3V   GND → GND   SDA → GPIO2   SCL → GPIO3
 | `robotctl monitor` 3D 视图 | `--fake` 下可试，姿态静止 |
 | LLM/语音交互 | 本仓库无板上实现——设计上是服务器侧 agent 走 `mediad` 的 WebSocket（见 Arch.md"远程网关"） |
 
+---
+
+## 附录 A：Docker 构建与 systemd 全流程验证（2026-09-07 完成）
+
+不依赖 Pi 的一条独立验证路径：`scripts/systemd-test.sh` 在**真 systemd（pid 1）的特权容器**
+里驱动完整更新剧本。**23 项断言全部通过**。
+
+### 验证覆盖（6 个版本的剧本）
+
+| 阶段 | 断言要点 |
+|---|---|
+| bootstrap 安装 1.0.0 | postinstall 在裸板上安装、启用并启动全新单元 |
+| 正常更新 1.1.0 | `on_apply` 确实重启了 release 携带的单元（**PID 更换**，201→401）；没有碰只有计时器有权启动的恢复单元 |
+| 延迟重启 | 瞬态计时器 5 秒后真的替换 updaterd（222→532）——**子进程做不到**，它坐在正被杀的 cgroup 里；继任者运行新版且对账无事可修 |
+| `systemd-run` 损坏（1.2.0） | 无法调度的重启**不算更新失败**（提交已落账）；journal 记录原因；继任者启动时把滞留旧版的 btd 拉到新版；不对自己重启（那将是死循环） |
+| sysusers 顺序（1.3.0） | 账户先于单元：release 自带用户存在且其单元在跑 |
+| 幽灵用户（1.4.0） | 更新失败且**点名单元**而非账户；回滚到 1.3.0；"已回滚"与"一个单元没回来"作为两个事实分开上报；不声称未核实的停机 |
+| 坏单元（1.5.0） | 回滚而非谎报成功；原因点名单元而非 "unreachable"；回滚后守护进程恢复运行 |
+
+### 本机环境适配（均标注 LOCAL ADAPTATION，上游不需要）
+
+| 坑 | 适配 |
+|---|---|
+| Docker Hub 直连不通、已配加速器失效 | 经 `docker.m.daocloud.io` 前缀拉取后重打标签 |
+| 容器内 `deb.debian.org` / crates.io 不通 | `dev-build.Dockerfile`：apt→TUNA、cargo→rsproxy |
+| **qemu 模拟下 systemd 作 pid 1 无法 spawn 任何服务**（所有单元 `Result=resources`，qemu 6.2/9 均复现；普通进程 spawn 正常） | `systemd-test.sh` 新增 `DUCK_SYSTEMD_TEST_PLATFORM`（默认 arm64 不变），本机以 amd64 原生运行。脚本作者的 arm64 路径是 Apple Silicon 上的原生执行，从未在 qemu 下跑过；测试断言全部是架构无关的 systemd 语义 |
+| 容器以 root 写入夹具、宿主删不掉 | `docker run --rm -v ... duck-dev-build rm -rf` 清理 |
+
+### 运行命令（本机）
+
+```bash
+export PATH=~/.cargo/bin:~/.local/bin:$PATH
+DUCK_SYSTEMD_TEST_PLATFORM=linux/amd64 sh scripts/systemd-test.sh
+```
+
+arm64 qemu 构建另见 `target/docker-arm64-qemu/`（保留的产物）：`cargo build -p updater -p robotctl` 在
+arm64 容器内可完成（10m57s），仅 systemd 场景需要 amd64。
+
 ## 排错入口
 
 - `journalctl -u updaterd -u robotd -f` —— 一切的第一现场
